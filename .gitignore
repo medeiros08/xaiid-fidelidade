@@ -1,0 +1,16 @@
+# Dados e amostras (pertencem aos autores do dataset; nunca versionar)
+*.zip
+*.csv
+*.parquet
+amostras/
+dados/
+resultados/
+# Documentos e imagens internos
+*.pdf
+*.png
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
