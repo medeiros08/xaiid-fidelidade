@@ -67,3 +67,7 @@ pip install -r requirements.txt
 ## Autor
 
 Arthur de Freitas Medeiros, bolsista de iniciação científica no projeto XAIID (UNIPAMPA).
+
+## Licença
+
+O código está sob a licença MIT (veja `LICENSE`). Os datasets não fazem parte do repositório nem da licença.
