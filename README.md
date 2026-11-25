@@ -49,7 +49,7 @@ pip install -r requirements.txt
    python -I analises/analisar.py resultados --modo v2 --protocolo xrce amostras/v2_xrce_D1.csv amostras/v2_xrce_D2.csv amostras/v2_xrce_D3.csv
    ```
 
-   Com `--contra-benign`, cada ataque é comparado só com o tráfego benigno.
+   Com `--contra-benign`, cada ataque é comparado só com o tráfego benigno. Com `--payload`, entram também as features de payload e os conjuntos `payload` e `payload_sem_flags`.
 
 3. Treino e teste cruzados:
 
@@ -57,12 +57,20 @@ pip install -r requirements.txt
    python -I analises/classificar.py resultados --protocolo xrce amostras/v2_xrce_D1.csv amostras/v2_xrce_D2.csv
    ```
 
+   Aceita `--payload` como o passo 2, e `--janela` para incluir as features de `janela.py`.
+
+4. Figura-resumo. Lê os arquivos `*_payload_resumo.csv` que o passo 2 gera com `--payload` (`v2_xrce`, `v2_zenoh`, `nsb_xrce` e `nsb_zenoh`):
+
+   ```
+   python -I analises/figura.py resultados/
+   ```
+
 ## Método, em resumo
 
 - **Amostra.** Até 150 fluxos por bloco de 3 h e classe, excluindo 4 min junto às fronteiras dos blocos. Os blocos 1, 3, 5, 6, 7, 8 e 10 são de treino, e os blocos 4, 9 e 11, de teste.
 - **Importância.** Informação mútua de cada feature com o alvo binário "é desta classe ou não", calculada no treino.
 - **Comparação.** O índice de Jaccard entre os dez primeiros atributos de cada cenário (1 = mesmas features, 0 = nenhuma em comum) é comparado com o valor esperado por acaso. O Spearman compara a ordem completa. Todas as análises são repetidas com cinco sementes (20261117 a 20261121).
-- **Conjuntos de features.** As análises rodam com todas as features, sem as de tamanho (`*_bytes`, `*_ps`), que carregam diferenças do ambiente de captura (por exemplo, o padding do quadro Ethernet), e sem tamanho nem flags TCP.
+- **Conjuntos de features.** As análises rodam com todas as features, sem as de tamanho (`*_bytes`, `*_ps`), que carregam diferenças do ambiente de captura (por exemplo, o padding do quadro Ethernet), e sem tamanho nem flags TCP. Com `--payload`, as 15 features de tamanho são trocadas por versões de payload (`pl_*`), que descontam o cabeçalho até a camada 4 em cada sentido (42 B em UDP/ICMP, 54 ou 66 B em TCP) e aplicam um piso que neutraliza o padding a 60 B.
 
 ## Autor
 

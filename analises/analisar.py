@@ -34,14 +34,61 @@ FEATURE = re.compile(
 FLAG = re.compile(r'_(syn|cwr|ece|urg|ack|psh|rst|fin)_packets$')
 
 
-def conjuntos(features):
+def conjuntos(features, payload=None):
     tamanho = [f for f in features if f.endswith('_bytes') or f.endswith('_ps')]
     flags = [f for f in features if FLAG.search(f)]
-    return {
+    sets = {
         'todas': features,
         'sem_tamanho': [f for f in features if f not in tamanho],
         'sem_tamanho_flags': [f for f in features if f not in tamanho and f not in flags],
     }
+    if payload:
+        sets['payload'] = sets['sem_tamanho'] + payload
+        sets['payload_sem_flags'] = sets['sem_tamanho_flags'] + payload
+    return sets
+
+
+# Cabeçalho até a camada 4 (Ethernet 14 + IPv4 20 + L4) e piso comum por protocolo. O piso é o que o padding do
+# quadro mínimo de 60 B (só no físico) esconde: 60 − 42 = 18 B em UDP/ICMP e 60 − 54 = 6 B em TCP.
+CAB = {17: 42, 1: 42, 6: 54}
+PISO = {17: 18, 1: 18, 6: 6}
+CAB_OUTROS, PISO_OUTROS = 34, 26
+TS_TCP = 12  # opção de timestamp TCP (Linux usa; o lwIP do ESP32, não)
+
+
+def adicionar_payload(df):
+    """Cria 15 features de payload (pl_*) a partir das de tamanho, descontando o cabeçalho por sentido.
+
+    TCP: o cabeçalho é 54 B, ou 66 B se o menor quadro do sentido tiver 66 B ou mais (timestamp TCP; o menor
+    quadro costuma ser um ACK puro). A mesma regra vale em todos os cenários. O desvio-padrão não muda com o
+    desconto e é mantido. Retorna o DataFrame e a lista de colunas novas.
+    """
+    proto = df['protocol']
+    cab0 = proto.map(CAB).fillna(CAB_OUTROS)
+    piso = proto.map(PISO).fillna(PISO_OUTROS)
+    novas, n, pl = {}, {}, {}
+    for d in ('src2dst', 'dst2src'):
+        n[d] = df[f'{d}_packets']
+        cab = cab0 + np.where(proto.eq(6) & (df[f'{d}_min_ps'] >= cab0 + TS_TCP), TS_TCP, 0)
+        vazio = n[d].eq(0)
+        for est in ('min', 'mean', 'max'):
+            v = np.maximum(df[f'{d}_{est}_ps'] - cab, piso)
+            pl[d, est] = v.where(~vazio, 0)
+            novas[f'pl_{d}_{est}_ps'] = pl[d, est]
+        novas[f'pl_{d}_stddev_ps'] = df[f'{d}_stddev_ps']
+        novas[f'pl_{d}_bytes'] = np.maximum(df[f'{d}_bytes'] - n[d] * cab, n[d] * piso).where(~vazio, 0)
+    tem = {d: n[d] > 0 for d in n}
+    inf = np.inf
+    novas['pl_bidirectional_min_ps'] = np.minimum(pl['src2dst', 'min'].where(tem['src2dst'], inf),
+                                                  pl['dst2src', 'min'].where(tem['dst2src'], inf)).replace(inf, 0)
+    novas['pl_bidirectional_max_ps'] = np.maximum(pl['src2dst', 'max'], pl['dst2src', 'max'])
+    tot = (n['src2dst'] + n['dst2src']).replace(0, np.nan)
+    novas['pl_bidirectional_mean_ps'] = ((pl['src2dst', 'mean'] * n['src2dst'] + pl['dst2src', 'mean'] * n['dst2src'])
+                                         / tot).fillna(0)
+    novas['pl_bidirectional_stddev_ps'] = df['bidirectional_stddev_ps']
+    novas['pl_bidirectional_bytes'] = novas['pl_src2dst_bytes'] + novas['pl_dst2src_bytes']
+    novas = pd.DataFrame(novas, index=df.index)
+    return pd.concat([df, novas], axis=1), list(novas.columns)
 
 
 def filtrar_nsb(df, protocolo):
@@ -111,24 +158,37 @@ def main():
     p.add_argument('--protocolo', choices=['xrce', 'zenoh'], required=True)
     p.add_argument('--sementes', default='20261117,20261118,20261119,20261120,20261121')
     p.add_argument('--contra-benign', action='store_true', help='MI de cada ataque só contra o Benign')
+    p.add_argument('--payload', action='store_true',
+                   help='acrescenta as features de payload (adicionar_payload) e os conjuntos payload e payload_sem_flags')
     a = p.parse_args()
     seeds = [int(s) for s in a.sementes.split(',')]
     out = Path(a.saida); out.mkdir(parents=True, exist_ok=True)
-    tag = f'{a.modo}_{a.protocolo}' + ('_vs_benign' if a.contra_benign else '')
+    tag = f'{a.modo}_{a.protocolo}' + ('_vs_benign' if a.contra_benign else '') + ('_payload' if a.payload else '')
 
-    dados = {}
+    dados, plcols = {}, []
     for path in a.amostras:
         df = pd.read_csv(path, low_memory=False)
+        if a.payload:
+            df, plcols = adicionar_payload(df)
         dados[df['cenario'].iloc[0]] = df
     cenarios = sorted(dados)
     features = [c for c in dados[cenarios[0]].columns if FEATURE.fullmatch(c)]
-    sets = conjuntos(features)
+    sets = conjuntos(features, plcols)
+
+    def mi_todas(df, classes, seed):
+        # A MI das features originais é calculada como antes (o ruído do estimador depende das colunas);
+        # a das de payload, à parte, e as duas são juntadas.
+        base = mi_por_classe(df, features, classes, seed, a.contra_benign)
+        if not plcols:
+            return base
+        extra = mi_por_classe(df, plcols, classes, seed, a.contra_benign)
+        return {c: (pd.concat([base[c][0], extra[c][0]]), base[c][1]) for c in base}
 
     rows, tops, suporte = [], [], []
     for seed in seeds:
         prep = {d: preparar(dados[d], a.modo, a.protocolo, seed) for d in cenarios}
         classes = sorted(set.intersection(*(set(prep[d][TARGET]) for d in cenarios)))
-        mi = {d: mi_por_classe(prep[d], features, classes, seed, a.contra_benign) for d in cenarios}
+        mi = {d: mi_todas(prep[d], classes, seed) for d in cenarios}
         if a.contra_benign:
             classes = [c for c in classes if c != 'Benign']
         for d in cenarios:
@@ -164,7 +224,7 @@ def main():
     print(f'=== {tag}: suporte (positivos na amostra de análise, média das sementes) ===')
     print(sup.groupby(['classe', 'cenario'])['n_pos'].mean().unstack().round(0).to_string())
     for nome in sets:
-        if a.protocolo == 'xrce' and nome == 'sem_tamanho_flags':
+        if a.protocolo == 'xrce' and nome in ('sem_tamanho_flags', 'payload_sem_flags'):
             continue
         print(f'\n=== {tag} · {nome}: Jaccard top 10 (média [mín–máx] em {len(seeds)} sementes) · acaso ===')
         r = resumo[resumo['conjunto'] == nome].copy()

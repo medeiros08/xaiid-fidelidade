@@ -26,7 +26,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score, recall_score
 
-from analisar import FEATURE, TARGET, TREINO, conjuntos, filtrar_nsb
+from analisar import FEATURE, TARGET, TREINO, adicionar_payload, conjuntos, filtrar_nsb
 
 TESTE = [4, 9, 11]
 START, END = 'bidirectional_first_seen_ms', 'bidirectional_last_seen_ms'
@@ -60,11 +60,15 @@ def main():
     p.add_argument('--janela', action='store_true',
                    help='junta as features de janela de janela.py (janela_<amostra>.csv, na mesma pasta) e '
                         'avalia cada conjunto com e sem elas')
+    p.add_argument('--payload', action='store_true',
+                   help='acrescenta as features de payload e os conjuntos payload e payload_sem_flags')
     a = p.parse_args()
     seeds = [int(s) for s in a.sementes.split(',')]
-    dados = {}
+    dados, plcols = {}, []
     for path in a.amostras:
         df = pd.read_csv(path, low_memory=False)
+        if a.payload:
+            df, plcols = adicionar_payload(df)
         if a.janela:
             jan = pd.read_csv(Path(path).with_name('janela_' + Path(path).name))
             df = df.merge(jan, on='linha_csv', how='left', validate='one_to_one')
@@ -74,9 +78,10 @@ def main():
             print(f"{df['cenario'].iloc[0]}: blocos de {passo / 60000:.1f} min")
         dados[df['cenario'].iloc[0]] = df
     features = [c for c in dados['D1'].columns if FEATURE.fullmatch(c)]
-    sets = conjuntos(features)
+    sets = conjuntos(features, plcols)
     if a.protocolo == 'xrce':
         sets.pop('sem_tamanho_flags')
+        sets.pop('payload_sem_flags', None)
     if a.janela:
         jcols = [c for c in dados['D1'].columns if c.startswith('jan')]
         sets.update({f'{nome}+janela': cols + jcols for nome, cols in list(sets.items())})
@@ -111,7 +116,7 @@ def main():
                                    'classe': c, 'recall': r} for c, r in zip(classes, rec)]
 
     out = Path(a.saida); out.mkdir(parents=True, exist_ok=True)
-    tag = f'{a.modo}_{a.protocolo}' + ('_janela' if a.janela else '')
+    tag = f'{a.modo}_{a.protocolo}' + ('_payload' if a.payload else '') + ('_janela' if a.janela else '')
     res = pd.DataFrame(rows); res.to_csv(out / f'{tag}_cruzado_f1.csv', index=False)
     pc = pd.DataFrame(per_class); pc.to_csv(out / f'{tag}_cruzado_recall.csv', index=False)
     pd.set_option('display.width', 250)
